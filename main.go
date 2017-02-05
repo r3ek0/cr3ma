@@ -1,4 +1,3 @@
-// This is a small bot that messages someone (ZX9TZZ7P) and replies to everything with a qouted echo
 package main
 
 import (
@@ -67,15 +66,39 @@ func forwardGroupMessage(ctx *o3.SessionContext, smc chan<- o3.Message, tr *o3.T
 func main() {
 
 	var (
-		pass               = []byte{0xA, 0xB, 0xC, 0xD, 0xE}
+		envpass            = os.Getenv("CR3MAPASS")
+		cr3mahome          = os.Getenv("CR3MAHOME")
+		pass               = []byte(envpass)
 		tr                 o3.ThreemaRest
 		idpath             = "threema.id"
 		abpath             = "address.book"
 		gdpath             = "group.directory"
 		tid                o3.ThreemaID
-		pubnick            = "cr3ma-bot"
-		jsonReceiverSocket = ":8082"
+		pubnick            = os.Getenv("CR3MANICK")
+		jsonReceiverSocket = os.Getenv("CR3MASOCKET")
 	)
+
+	if len(jsonReceiverSocket) < 1 {
+		log.Println("Environment varibale not set: CR3MASOCKET")
+		log.Println("example: CR3MASOCKET=localhost:8082")
+		os.Exit(1)
+	}
+
+	if len(envpass) < 1 {
+		log.Println("Environment varibale not set: CR3MAPASS")
+		log.Println("example: CR3MAPASS=test123")
+		os.Exit(1)
+	}
+
+	if len(cr3mahome) > 0 {
+		idpath = cr3mahome + "/" + idpath
+		abpath = cr3mahome + "/" + abpath
+		gdpath = cr3mahome + "/" + gdpath
+	}
+
+	if len(pubnick) < 1 {
+		pubnick = "cr3ma-test-bot"
+	}
 
 	// check whether an id file exists or else create a new one
 	if _, err := os.Stat(idpath); err != nil {
