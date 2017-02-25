@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -28,6 +27,7 @@ func checkSaveContact(ctx *o3.SessionContext, tr *o3.ThreemaRest, contact string
 			log.Fatal(err)
 		}
 		// add to address book
+		log.Printf("Adding contact: %s - %s\n", newContact.ID, newContact.Name)
 		ctx.ID.Contacts.Add(newContact)
 
 		// save address book
@@ -43,24 +43,27 @@ func checkSaveContact(ctx *o3.SessionContext, tr *o3.ThreemaRest, contact string
 
 func forwardMessage(ctx *o3.SessionContext, smc chan<- o3.Message, tr *o3.ThreemaRest, msg JsonMessage) {
 	// send the message
-	log.Printf("Sending %s to %s", msg.Msg, msg.To)
 	err := ctx.SendTextMessage(msg.To, msg.Msg, smc)
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Printf("[%-20s] %-20s -> %s", msg.To, ctx.ID.Nick.String(), msg.Msg)
 }
 
 func forwardGroupMessage(ctx *o3.SessionContext, smc chan<- o3.Message, tr *o3.ThreemaRest, msg JsonMessage) {
 	// send the message
-	log.Printf("Sending %s to %s", msg.Msg, msg.To)
-	//groupid := []byte(msg.To)
-	group, ok := ctx.ID.Groups.GetByID(msg.To)
-	if ok {
-		time.Sleep(500 * time.Millisecond)
-		ctx.SendGroupTextMessage(group, msg.Msg, smc)
-	} else {
+	groupid, _ := ctx.ID.Groups.ReadGroupID(msg.To)
+
+	idx, group := ctx.ID.Groups.GetGroupById(groupid)
+	if idx < 0 {
 		log.Printf("ERROR sending to group [%s].\n", msg.To)
+	} else {
+		time.Sleep(500 * time.Millisecond)
+		nick := ctx.ID.Nick.String()
+		ctx.SendGroupTextMessage(group, msg.Msg, smc)
+		log.Printf("[%-20s] [%-20s] -> %s", group.Name, nick, msg.Msg)
 	}
+
 }
 
 func main() {
@@ -160,7 +163,6 @@ func main() {
 			panic(err)
 
 		}
-		log.Println(string(body))
 
 		var msg JsonMessage
 		err = json.Unmarshal(body, &msg)
@@ -169,18 +171,16 @@ func main() {
 		}
 		defer req.Body.Close()
 
-		log.Println(msg.To, msg.Msg)
-
 		checkSaveContact(&ctx, &tr, msg.To, abpath)
 		forwardMessage(&ctx, sendMsgChan, &tr, msg)
 	})
+
 	http.HandleFunc("/sendGroup", func(rw http.ResponseWriter, req *http.Request) {
 		body, err := ioutil.ReadAll(req.Body)
 		if err != nil {
 			panic(err)
 
 		}
-		log.Println(string(body))
 
 		var msg JsonMessage
 		err = json.Unmarshal(body, &msg)
@@ -189,13 +189,11 @@ func main() {
 		}
 		defer req.Body.Close()
 
-		log.Println(msg.To, msg.Msg)
-
 		forwardGroupMessage(&ctx, sendMsgChan, &tr, msg)
 	})
 
-	log.Printf("Starting json receiver on port %s", jsonReceiverSocket)
 	go http.ListenAndServe(jsonReceiverSocket, nil)
+	log.Printf("Json receiver on port %s", jsonReceiverSocket)
 
 	// handle incoming messages
 	for receivedMessage := range receiveMsgChan {
@@ -209,21 +207,12 @@ func main() {
 		case o3.AudioMessage:
 			// play the audio if you like
 		case o3.TextMessage:
-			// respond with a quote of what was send to us.
-
 			// but only if it's no a message we sent to ourselves, avoid recursive neverending qoutes
 			if tid.String() == msg.Sender().String() {
 				continue
 			}
+			log.Printf("[%-20s] -> %s", msg.PubNick(), msg.Text())
 
-			// to make the quote render nicely in the app we use "markdown"
-			// of the form "> PERSONWEQUOTE: Text of qoute\nSomething we wanna add."
-			qoute := fmt.Sprintf("> %s: %s\n%s", msg.Sender(), msg.Text(), "Exactly!")
-			// we use the convinient "SendTextMessage" function to send
-			err = ctx.SendTextMessage(msg.Sender().String(), qoute, sendMsgChan)
-			if err != nil {
-				log.Fatal(err)
-			}
 			// confirm to the sender that we received the message
 			// this is how one can send messages manually without helper functions like "SendTextMessage"
 			drm, err := o3.NewDeliveryReceiptMessage(&ctx, msg.Sender().String(), msg.ID(), o3.MSGDELIVERED)
@@ -231,6 +220,7 @@ func main() {
 				log.Fatal(err)
 			}
 			sendMsgChan <- drm
+
 			// show message read to rid
 			upm, err := o3.NewDeliveryReceiptMessage(&ctx, msg.Sender().String(), msg.ID(), o3.MSGREAD)
 			if err != nil {
@@ -239,14 +229,35 @@ func main() {
 			sendMsgChan <- upm
 
 		case o3.GroupTextMessage:
-			log.Printf("%s for Group [%x] created by [%s]: %s\n", msg.Sender(), msg.GroupID(), msg.GroupCreator(), msg.Text())
+			idx, group := ctx.ID.Groups.GetGroupById(msg.GroupID())
+			if idx < 0 {
+				log.Fatal("no such group")
+			}
+			log.Printf("[%-20s] %-20s -> %s", group.Name, msg.PubNick(), msg.Text())
 		case o3.GroupManageSetNameMessage:
+			// We need to update the group dir
+			idx, group := ctx.ID.Groups.GetGroupById(msg.GroupID())
+			if idx < 0 {
+				var group o3.Group
+				group.GroupID = msg.GroupID()
+				group.CreatorID = msg.Sender()
+				group.Name = msg.Name()
+				group.Members = append(group.Members, msg.Sender())
+				group.Members = append(group.Members, ctx.ID.ID)
+
+				ctx.ID.Groups.AddGroup(group)
+			}
+			group.Name = msg.Name()
+			ctx.ID.Groups.UpdateGroup(group)
+			ctx.ID.Groups.SaveToFile(gdpath)
+
 			log.Printf("Group [%x] is now called %s\n", msg.GroupID(), msg.Name())
+
 		case o3.GroupManageSetMembersMessage:
 			log.Printf("Group [%x] member update\n", msg.GroupID())
-			_, ok := ctx.ID.Groups.Get(msg.Sender(), msg.GroupID())
+			idx, group := ctx.ID.Groups.GetGroupById(msg.GroupID())
 			members := msg.Members()
-			if !ok {
+			if idx > 0 {
 				// replace our id with group creator id
 				// \bc we know we are in the group, but we don't know who the creator is
 				for i := range members {
@@ -256,17 +267,22 @@ func main() {
 				}
 			}
 
+			group.Members = members
 			// TODO: add only adds if the group is new so updates on the member list do not work yet
-			ctx.ID.Groups.Upsert(o3.Group{CreatorID: msg.Sender(), GroupID: msg.GroupID(), Members: members})
+			//ctx.ID.Groups.Upsert(o3.Group{CreatorID: msg.Sender(), GroupID: msg.GroupID(), Members: members})
+			ctx.ID.Groups.UpdateGroup(group)
 			ctx.ID.Groups.SaveToFile(gdpath)
 			log.Printf("Group [%x] now includes %v\n", msg.GroupID(), msg.Members())
 
 		case o3.GroupMemberLeftMessage:
-			log.Printf("Member [%s] left the Group [%x]\n", msg.Sender(), msg.GroupID())
+			//log.Printf("Member [%s] left the Group [%x]\n", msg.PubNick(), msg.GroupID())
+			continue
 		case o3.DeliveryReceiptMessage:
-			log.Printf("Message [%x] has been acknowledged by the server. %s\n", msg.MsgID(), msg.GetPrintableContent())
+			//log.Printf("Message [%x] has been acknowledged by the server. %s\n", msg.MsgID(), msg.GetPrintableContent())
+			continue
 		case o3.TypingNotificationMessage:
-			log.Printf("Typing Notification from %s: [%x]\n", msg.Sender(), msg.OnOff)
+			//log.Printf("Typing Notification from %s: [%x]\n", msg.PubNick(), msg.OnOff)
+			continue
 		default:
 			log.Printf("Unknown message type from: %s\nContent: %#v", msg.Sender(), msg)
 		}
