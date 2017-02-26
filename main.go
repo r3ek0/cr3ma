@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -79,6 +80,7 @@ func main() {
 		tid                o3.ThreemaID
 		pubnick            = os.Getenv("CR3MANICK")
 		jsonReceiverSocket = os.Getenv("CR3MASOCKET")
+		prometheusReceiver = os.Getenv("CR3MAPROMCONTACT")
 	)
 
 	if len(jsonReceiverSocket) < 1 {
@@ -157,11 +159,58 @@ func main() {
 		log.Fatal(err)
 	}
 
+	http.HandleFunc("/alert", func(rw http.ResponseWriter, req *http.Request) {
+		var threemaMsg string
+		body, err := ioutil.ReadAll(req.Body)
+		if err != nil {
+			log.Fatal(err)
+			return
+		}
+		defer req.Body.Close()
+		//log.Print(string(body))
+		var promMsg PrometheusMessage
+		err = json.Unmarshal(body, &promMsg)
+		if err != nil {
+			log.Fatal(err)
+			return
+		}
+
+		if promMsg.Status == "firing" {
+			threemaMsg = fmt.Sprintf("*===* *ALERT* *===*\n")
+		} else {
+			threemaMsg = fmt.Sprintf("\\o\\ *RESOLVED* /o/\n")
+		}
+
+		if len(promMsg.CommonAnnotations.Summary) > 0 {
+			threemaMsg = fmt.Sprintf("%s%s\n", threemaMsg, promMsg.CommonAnnotations.Summary)
+		} else {
+			for _, alert := range promMsg.Alerts {
+				threemaMsg = fmt.Sprintf("%s%s\n", threemaMsg, alert.Annotations.Summary)
+			}
+		}
+		if len(prometheusReceiver) < 1 {
+			log.Printf("\n%s\n", threemaMsg)
+			return
+		}
+		var msg JsonMessage
+		msg.Msg = threemaMsg
+		msg.To = prometheusReceiver
+
+		groupid, _ := ctx.ID.Groups.ReadGroupID(msg.To)
+		idx, _ := ctx.ID.Groups.GetGroupById(groupid)
+		if idx < 0 {
+			checkSaveContact(&ctx, &tr, msg.To, abpath)
+			forwardMessage(&ctx, sendMsgChan, &tr, msg)
+		} else {
+			forwardGroupMessage(&ctx, sendMsgChan, &tr, msg)
+		}
+		return
+
+	})
 	http.HandleFunc("/send", func(rw http.ResponseWriter, req *http.Request) {
 		body, err := ioutil.ReadAll(req.Body)
 		if err != nil {
 			panic(err)
-
 		}
 
 		var msg JsonMessage
@@ -170,26 +219,14 @@ func main() {
 			panic(err)
 		}
 		defer req.Body.Close()
-
-		checkSaveContact(&ctx, &tr, msg.To, abpath)
-		forwardMessage(&ctx, sendMsgChan, &tr, msg)
-	})
-
-	http.HandleFunc("/sendGroup", func(rw http.ResponseWriter, req *http.Request) {
-		body, err := ioutil.ReadAll(req.Body)
-		if err != nil {
-			panic(err)
-
+		groupid, _ := ctx.ID.Groups.ReadGroupID(msg.To)
+		idx, _ := ctx.ID.Groups.GetGroupById(groupid)
+		if idx < 0 {
+			checkSaveContact(&ctx, &tr, msg.To, abpath)
+			forwardMessage(&ctx, sendMsgChan, &tr, msg)
+		} else {
+			forwardGroupMessage(&ctx, sendMsgChan, &tr, msg)
 		}
-
-		var msg JsonMessage
-		err = json.Unmarshal(body, &msg)
-		if err != nil {
-			panic(err)
-		}
-		defer req.Body.Close()
-
-		forwardGroupMessage(&ctx, sendMsgChan, &tr, msg)
 	})
 
 	go http.ListenAndServe(jsonReceiverSocket, nil)
